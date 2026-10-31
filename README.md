@@ -47,7 +47,9 @@ npm run db:seed-demo
 Renseignez `BTP_ADMIN_USERNAME` et `BTP_ADMIN_PASSWORD` dans `.env` avec les identifiants de votre administrateur. Le script ajoute le projet de démonstration via l'API et préremplit les estimations PERT des tâches. Il refuse de remplacer un projet existant, sauf si vous ajoutez `-- --force` à la commande. Vous pouvez définir `BTP_BASE_URL` si l'application n'est pas à `http://localhost:3000`.
 
 ### Sauvegarder la base MySQL
-Avec `.env` configuré, lancez `npm run db:backup`. Le fichier SQL complet (tables et données, photos comprises) est créé dans `backups/`. Le dossier est ignoré par Git, car la sauvegarde contient les données et comptes du chantier. Pour la restaurer, importez le fichier dans MySQL avec `mysql -u UTILISATEUR -p < backups/NOM_DU_FICHIER.sql`.
+Avec `.env` configuré, lancez `npm run db:backup` pour créer une sauvegarde SQL complète (tables, données et photos) dans `backups/`. Chaque sauvegarde est restaurée dans une base temporaire pour vérifier qu'elle est lisible et que les nombres d'enregistrements correspondent ; celles de plus de 30 jours sont supprimées après réussite. Le dossier est ignoré par Git et les nouvelles sauvegardes sont accessibles au compte Windows courant, aux administrateurs et au système.
+
+Quand le serveur de l'application reste lancé, il crée aussi automatiquement une sauvegarde chaque jour à 02:00 (heure locale). Si le serveur est arrêté à cette heure, la sauvegarde sera faite au prochain horaire quotidien où il tourne. Pour restaurer manuellement, importez le fichier SQL dans MySQL avec `mysql -u UTILISATEUR -p < backups/NOM_DU_FICHIER.sql`.
 
 ### Test rapide (5 min)
 1. Connecté en admin : « Explorer avec des données de démo » ou utilisez le script ci-dessus (des durées PERT d'exemple sont créées).

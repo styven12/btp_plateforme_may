@@ -42,12 +42,62 @@ function literal(value) {
   return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\0/g, '\\0').replace(/\r/g, '\\r').replace(/\n/g, '\\n')}'`;
 }
 
+function splitSql(sql) {
+  const statements = [];
+  let start = 0, quote = null;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (quote) {
+      if (ch === '\\' && quote !== '`') { i++; continue; }
+      if (ch === quote) {
+        if (sql[i + 1] === quote) { i++; continue; }
+        quote = null;
+      }
+    } else if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+    else if (ch === ';') {
+      const statement = sql.slice(start, i).replace(/^\s*--[^\n]*(?:\n|$)/gm, '').trim();
+      if (statement) statements.push(statement);
+      start = i + 1;
+    }
+  }
+  return statements;
+}
+
+async function verifyRestore(db, sql, database, expectedCounts) {
+  const testDatabase = `btp_backup_check_${process.pid}_${Date.now()}`;
+  await db.query(`CREATE DATABASE ${identifier(testDatabase)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  try {
+    await db.query(`USE ${identifier(testDatabase)}`);
+    for (const statement of splitSql(sql)) {
+      if (/^(CREATE DATABASE|USE\s)/i.test(statement)) continue;
+      await db.query(statement);
+    }
+    for (const [table, expected] of Object.entries(expectedCounts)) {
+      const [[row]] = await db.query(`SELECT COUNT(*) AS count FROM ${identifier(table)}`);
+      if (Number(row.count) !== expected) throw new Error(`Vérification de restauration échouée pour ${table}.`);
+    }
+  } finally {
+    await db.query(`DROP DATABASE IF EXISTS ${identifier(testDatabase)}`);
+    await db.query(`USE ${identifier(database)}`);
+  }
+}
+
+function pruneBackups(dir, database, keepDays = 30) {
+  const cutoff = Date.now() - keepDays * 864e5;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.startsWith(`${database}_`) || !entry.name.endsWith('.sql')) continue;
+    const file = path.join(dir, entry.name);
+    if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file);
+  }
+}
+
 async function main() {
   const db = await mysql.createConnection({ ...connectionConfig(), supportBigNumbers: true, bigNumberStrings: true });
   try {
     const database = db.config.database;
     const [tables] = await db.query('SHOW FULL TABLES WHERE Table_type = \'BASE TABLE\'');
     const tableNames = tables.map(row => Object.values(row)[0]).sort();
+    const expectedCounts = {};
     const lines = [
       `-- BTP-Vision MySQL backup: ${new Date().toISOString()}`,
       `-- Database: ${database}`,
@@ -63,6 +113,7 @@ async function main() {
       const [[definition]] = await db.query(`SHOW CREATE TABLE ${identifier(table)}`);
       lines.push('', `DROP TABLE IF EXISTS ${identifier(table)};`, `${definition['Create Table']};`);
       const [rows] = await db.query(`SELECT * FROM ${identifier(table)}`);
+      expectedCounts[table] = rows.length;
       if (!rows.length) continue;
       const columns = Object.keys(rows[0]);
       lines.push(`INSERT INTO ${identifier(table)} (${columns.map(identifier).join(', ')}) VALUES`);
@@ -74,8 +125,11 @@ async function main() {
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
     const file = path.join(dir, `${database}_${stamp}.sql`);
-    fs.writeFileSync(file, lines.join('\n'), { encoding: 'utf8', flag: 'wx' });
-    console.log(`Sauvegarde créée : ${path.relative(process.cwd(), file)} (${tableNames.length} tables)`);
+    const sql = lines.join('\n');
+    await verifyRestore(db, sql, database, expectedCounts);
+    fs.writeFileSync(file, sql, { encoding: 'utf8', flag: 'wx' });
+    pruneBackups(dir, database);
+    console.log(`Sauvegarde vérifiée : ${path.relative(process.cwd(), file)} (${tableNames.length} tables, rétention 30 jours)`);
   } finally {
     await db.end();
   }

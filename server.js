@@ -15,6 +15,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 const mysql = require('mysql2/promise');
 const { runMonteCarlo, pertStats } = require('./pert.js');   // moteur probabiliste
 
@@ -452,9 +453,31 @@ const server = http.createServer(async (req, res) => {
 });
 
 initializeDatabase().then(() => {
-  server.listen(PORT, () => console.log(`BTP-Vision tourne sur http://localhost:${PORT}`));
+  server.listen(PORT, () => {
+    console.log(`BTP-Vision tourne sur http://localhost:${PORT}`);
+    scheduleDailyBackup();
+  });
 }).catch(e => {
   console.error('Connexion ou initialisation MySQL impossible :', e.message);
   db.end().catch(() => {});
   process.exitCode = 1;
 });
+
+function scheduleDailyBackup() {
+  const nextRun = new Date();
+  nextRun.setHours(2, 0, 0, 0);
+  if (nextRun <= new Date()) nextRun.setDate(nextRun.getDate() + 1);
+  const timer = setTimeout(() => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'scripts', 'backup-db.js')], {
+      cwd: __dirname,
+      stdio: 'inherit',
+      windowsHide: true
+    });
+    child.on('error', error => console.error('Sauvegarde quotidienne impossible :', error.message));
+    child.on('close', code => {
+      if (code !== 0) console.error(`La sauvegarde quotidienne a échoué (code ${code}).`);
+      scheduleDailyBackup();
+    });
+  }, Math.max(1000, nextRun.getTime() - Date.now()));
+  timer.unref();
+}
