@@ -213,10 +213,23 @@ const failed = k => { const f = fails.get(k) || { n: 0 }; f.n++; if (f.n >= 5) {
 
 /* ---- 5. SIMULATION : tâches + 3 durées + état (tâche faite ou non) ---- */
 async function buildSimulationInput(remainingOnly) {
-  const [[row]] = await db.query('SELECT json FROM state WHERE id=1');
+  const connection = await db.getConnection();
+  let row, estimates, lastEstimateUpdatedAt;
+  try {
+    await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT');
+    [[row]] = await connection.query('SELECT json, version FROM state WHERE id=1');
+    [estimates] = await connection.query('SELECT task_id, optimistic, probable, pessimistic FROM estimates');
+    [[{ lastEstimateUpdatedAt }]] = await connection.query('SELECT DATE_FORMAT(MAX(updated_at), \'%Y-%m-%d %H:%i:%s\') AS lastEstimateUpdatedAt FROM estimates');
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
   const S = row ? JSON.parse(row.json) : null;
   if (!S || !S.phases) return null;
-  const [estimates] = await db.query('SELECT * FROM estimates');
   const est = new Map(estimates.map(r => [r.task_id, r]));
   const tasks = [], missing = [];
   S.phases.forEach((ph, i) => (ph.tasks || []).forEach(t => {
@@ -225,7 +238,8 @@ async function buildSimulationInput(remainingOnly) {
     if (!e) return missing.push({ id: t.id, label: t.t, phase: ph.name });
     tasks.push({ id: t.id, label: t.t, phase: ph.name, phaseIndex: i, o: e.optimistic, m: e.probable, p: e.pessimistic });
   }));
-  return { tasks, missing };
+  return { tasks, missing, source: { database: 'MySQL', stateVersion: row.version,
+    usedEstimateCount: tasks.length, lastEstimateUpdatedAt } };
 }
 
 /* ---- 6. LE SERVEUR ---- */
@@ -441,6 +455,7 @@ const server = http.createServer(async (req, res) => {
       }).sort((a, b) => b.share - a.share);
       result.missing = input.missing;
       result.remainingOnly = remainingOnly;
+      result.source = input.source;
       return send(res, 200, result);
     }
 
